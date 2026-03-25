@@ -50,6 +50,8 @@ Turn `promptlab-v1.8.1` into a production-ready web version of Promptlab with:
 - Added server-side JSON caching keyed by file mtime to avoid reparsing the same database on every request
 - Added cached token summary list and token lookup map for faster `/api/data` and `/api/tokens/:id`
 - Added startup cache warmup and increased local Node heap for Cloudflare-tunneled PC hosting
+- Added generated Web DB assets pipeline that extracts embedded base64 images into static files
+- Reduced generated catalog payload from huge embedded-image JSON to lightweight summary + token chunks + asset URLs
 
 ## In Progress
 

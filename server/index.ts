@@ -55,6 +55,7 @@ type WebDbManifest = {
   summaryFile: string;
   tokenIndexFile: string;
   chunkDir: string;
+  assetDir: string;
   chunkSize: number;
 };
 
@@ -574,6 +575,10 @@ app.post('/api/admin/suggestions/:id/status', requireAdmin, (req, res) => {
 });
 
 if (fs.existsSync(path.join(projectRoot, 'dist'))) {
+  if (fs.existsSync(path.join(webDbDir, 'assets'))) {
+    app.use('/webdb-assets', express.static(path.join(webDbDir, 'assets')));
+  }
+
   app.use(express.static(path.join(projectRoot, 'dist')));
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api/')) {

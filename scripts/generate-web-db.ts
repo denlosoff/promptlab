@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -41,6 +42,7 @@ type WebDbManifest = {
   summaryFile: string;
   tokenIndexFile: string;
   chunkDir: string;
+  assetDir: string;
   chunkSize: number;
 };
 
@@ -53,6 +55,7 @@ const dataDir = path.isAbsolute(process.env.DATA_DIR || '')
 const webDbDir = path.join(dataDir, 'webdb');
 const webDbManifestPath = path.join(webDbDir, 'manifest.json');
 const chunkSize = 100;
+const publicAssetBasePath = '/webdb-assets';
 
 function ensureDataDirExists() {
   if (!fs.existsSync(dataDir)) {
@@ -146,10 +149,53 @@ function normalizeData(input: any): PromptlabData {
 
 function createTokenSummary(token: Token): Token {
   return {
-    ...token,
+    id: token.id,
+    name: token.name,
+    descriptionShort: token.descriptionShort,
+    aliases: token.aliases,
+    categoryIds: token.categoryIds,
     coverImage: token.examples.length > 0 ? token.examples[0] : undefined,
     examples: [],
     exampleCount: token.examples.length,
+  };
+}
+
+function getAssetInfo(example: string, tokenId: string, index: number) {
+  const match = example.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+  if (!match) {
+    return null;
+  }
+
+  const mimeType = match[1];
+  const base64Payload = match[2];
+  const extension = mimeType.split('/')[1]?.replace('jpeg', 'jpg') || 'bin';
+  const hash = crypto.createHash('sha1').update(base64Payload).digest('hex').slice(0, 16);
+
+  return {
+    fileName: `${tokenId}-${String(index + 1).padStart(2, '0')}-${hash}.${extension}`,
+    mimeType,
+    buffer: Buffer.from(base64Payload, 'base64'),
+  };
+}
+
+function materializeTokenExamples(token: Token, assetDir: string): Token {
+  const examples = token.examples.map((example, index) => {
+    const asset = getAssetInfo(example, token.id, index);
+    if (!asset) {
+      return example;
+    }
+
+    const assetPath = path.join(assetDir, asset.fileName);
+    if (!fs.existsSync(assetPath)) {
+      fs.writeFileSync(assetPath, asset.buffer);
+    }
+
+    return `${publicAssetBasePath}/${asset.fileName}`;
+  });
+
+  return {
+    ...token,
+    examples,
   };
 }
 
@@ -193,19 +239,24 @@ function main() {
   const sourceStats = fs.statSync(sourceFilePath);
   const parsed = JSON.parse(fs.readFileSync(sourceFilePath, 'utf8'));
   const data = normalizeData(parsed);
-  const summaryTokens = data.tokens.map(createTokenSummary);
   const tokenIndex: Record<string, string> = {};
   const tempDir = `${webDbDir}.tmp`;
   const chunkDirName = 'token-chunks';
+  const assetDirName = 'assets';
   const chunkDir = path.join(tempDir, chunkDirName);
+  const assetDir = path.join(tempDir, assetDirName);
 
   fs.rmSync(tempDir, { recursive: true, force: true });
   fs.mkdirSync(chunkDir, { recursive: true });
+  fs.mkdirSync(assetDir, { recursive: true });
+
+  const materializedTokens = data.tokens.map((token) => materializeTokenExamples(token, assetDir));
+  const summaryTokens = materializedTokens.map(createTokenSummary);
 
   writeJson(path.join(tempDir, 'summary.json'), { tokens: summaryTokens });
 
-  for (let index = 0; index < data.tokens.length; index += chunkSize) {
-    const chunkTokens = data.tokens.slice(index, index + chunkSize);
+  for (let index = 0; index < materializedTokens.length; index += chunkSize) {
+    const chunkTokens = materializedTokens.slice(index, index + chunkSize);
     const chunkFileName = `chunk-${String(index / chunkSize + 1).padStart(4, '0')}.json`;
     const tokensById = Object.fromEntries(chunkTokens.map((token) => [token.id, token]));
 
@@ -233,6 +284,7 @@ function main() {
     summaryFile: 'summary.json',
     tokenIndexFile: 'token-index.json',
     chunkDir: chunkDirName,
+    assetDir: assetDirName,
     chunkSize,
   };
 
