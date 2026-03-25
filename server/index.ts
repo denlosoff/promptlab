@@ -31,6 +31,41 @@ type PromptlabData = {
   tokens: Token[];
 };
 
+type CachedPromptlabData = {
+  filePath: string;
+  updatedAt: string;
+  mtimeMs: number;
+  data: PromptlabData;
+  summaryTokens: Token[];
+  tokensById: Map<string, Token>;
+};
+
+type WebDbManifest = {
+  schemaVersion: '1.0';
+  generatedAt: string;
+  source: {
+    fileName: string;
+    relativePath: string;
+    mtimeMs: number;
+    sizeBytes: number;
+  };
+  categoryCount: number;
+  tokenCount: number;
+  categories: Category[];
+  summaryFile: string;
+  tokenIndexFile: string;
+  chunkDir: string;
+  chunkSize: number;
+};
+
+type CachedWebDb = {
+  manifest: WebDbManifest;
+  summaryTokens: Token[];
+  tokenIndex: Record<string, string>;
+  manifestMtimeMs: number;
+  chunkCache: Map<string, Map<string, Token>>;
+};
+
 type SuggestionStatus = 'pending' | 'approved' | 'rejected';
 
 type TokenSuggestion = {
@@ -54,11 +89,15 @@ const dataDir = path.isAbsolute(process.env.DATA_DIR || '')
   ? String(process.env.DATA_DIR)
   : path.resolve(projectRoot, process.env.DATA_DIR || '..');
 const suggestionFile = path.join(dataDir, 'promptlab-suggestions.json');
+const webDbDir = path.join(dataDir, 'webdb');
+const webDbManifestPath = path.join(webDbDir, 'manifest.json');
 const adminPassword = process.env.ADMIN_PASSWORD || 'change-me';
 const serverPort = Number(process.env.PORT || 3001);
 const app = express();
 const sessions = new Map<string, number>();
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7;
+let cachedPromptlabData: CachedPromptlabData | null = null;
+let cachedWebDb: CachedWebDb | null = null;
 
 app.use(express.json({ limit: '20mb' }));
 
@@ -225,10 +264,143 @@ function createTokenSummary(token: Token): Token {
   };
 }
 
+function buildCachedPromptlabData(filePath: string, data: PromptlabData): CachedPromptlabData {
+  const stats = fs.statSync(filePath);
+  const summaryTokens = data.tokens.map(createTokenSummary);
+  const tokensById = new Map(data.tokens.map((token) => [token.id, token]));
+
+  return {
+    filePath,
+    updatedAt: stats.mtime.toISOString(),
+    mtimeMs: stats.mtimeMs,
+    data,
+    summaryTokens,
+    tokensById,
+  };
+}
+
+function loadJsonFile<T>(filePath: string): T {
+  return JSON.parse(fs.readFileSync(filePath, 'utf8')) as T;
+}
+
+function getCachedPromptlabData(): CachedPromptlabData {
+  ensureDataDirExists();
+  const filePath = resolveDataFilePath();
+
+  if (!fs.existsSync(filePath)) {
+    const emptyData: PromptlabData = { categories: [], tokens: [] };
+    fs.writeFileSync(filePath, JSON.stringify(emptyData, null, 2));
+  }
+
+  const stats = fs.statSync(filePath);
+
+  if (
+    cachedPromptlabData &&
+    cachedPromptlabData.filePath === filePath &&
+    cachedPromptlabData.mtimeMs === stats.mtimeMs
+  ) {
+    return cachedPromptlabData;
+  }
+
+  const raw = fs.readFileSync(filePath, 'utf8');
+  const parsed = JSON.parse(raw);
+  cachedPromptlabData = buildCachedPromptlabData(filePath, normalizeData(parsed));
+  return cachedPromptlabData;
+}
+
+function getCachedWebDb(): CachedWebDb | null {
+  ensureDataDirExists();
+
+  if (!fs.existsSync(webDbManifestPath)) {
+    return null;
+  }
+
+  const manifestStats = fs.statSync(webDbManifestPath);
+  const manifest = loadJsonFile<WebDbManifest>(webDbManifestPath);
+  const sourceFilePath = path.join(dataDir, manifest.source.relativePath);
+
+  if (!fs.existsSync(sourceFilePath)) {
+    return null;
+  }
+
+  const sourceStats = fs.statSync(sourceFilePath);
+  if (sourceStats.mtimeMs !== manifest.source.mtimeMs) {
+    return null;
+  }
+
+  if (
+    cachedWebDb &&
+    cachedWebDb.manifestMtimeMs === manifestStats.mtimeMs &&
+    cachedWebDb.manifest.source.mtimeMs === manifest.source.mtimeMs
+  ) {
+    return cachedWebDb;
+  }
+
+  const summaryFilePath = path.join(webDbDir, manifest.summaryFile);
+  const tokenIndexFilePath = path.join(webDbDir, manifest.tokenIndexFile);
+
+  if (!fs.existsSync(summaryFilePath) || !fs.existsSync(tokenIndexFilePath)) {
+    return null;
+  }
+
+  cachedWebDb = {
+    manifest,
+    summaryTokens: loadJsonFile<{ tokens: Token[] }>(summaryFilePath).tokens,
+    tokenIndex: loadJsonFile<Record<string, string>>(tokenIndexFilePath),
+    manifestMtimeMs: manifestStats.mtimeMs,
+    chunkCache: new Map(),
+  };
+
+  return cachedWebDb;
+}
+
+function getTokenFromWebDb(tokenId: string): Token | null {
+  const webDb = getCachedWebDb();
+  if (!webDb) {
+    return null;
+  }
+
+  const relativeChunkPath = webDb.tokenIndex[tokenId];
+  if (!relativeChunkPath) {
+    return null;
+  }
+
+  let chunkTokens = webDb.chunkCache.get(relativeChunkPath);
+  if (!chunkTokens) {
+    const chunkFilePath = path.join(webDbDir, ...relativeChunkPath.split('/'));
+    if (!fs.existsSync(chunkFilePath)) {
+      return null;
+    }
+
+    const chunk = loadJsonFile<{ tokensById: Record<string, Token> }>(chunkFilePath);
+    chunkTokens = new Map(Object.entries(chunk.tokensById));
+    webDb.chunkCache.set(relativeChunkPath, chunkTokens);
+  }
+
+  return chunkTokens.get(tokenId) || null;
+}
+
+function warmPromptlabCache() {
+  try {
+    const webDb = getCachedWebDb();
+    if (webDb) {
+      console.log(`Promptlab Web DB ready for ${webDb.manifest.source.fileName} with ${webDb.manifest.tokenCount} tokens`);
+      return;
+    }
+
+    const cachedData = getCachedPromptlabData();
+    console.log(`Promptlab cache ready for ${path.basename(cachedData.filePath)} with ${cachedData.data.tokens.length} tokens`);
+  } catch (error) {
+    console.error('Failed to warm Promptlab cache on startup:', error);
+  }
+}
+
 function writeDataFile(data: PromptlabData) {
   ensureDataDirExists();
   const filePath = resolveDataFilePath();
   fs.writeFileSync(filePath, JSON.stringify(normalizeData(data), null, 2));
+  cachedPromptlabData = null;
+  cachedWebDb = null;
   return filePath;
 }
 
@@ -254,7 +426,14 @@ app.get('/api/health', (_req, res) => {
 });
 
 app.get('/api/config', (_req, res) => {
-  const { filePath } = readDataFile();
+  const webDb = getCachedWebDb();
+  const filePath = webDb ? path.join(dataDir, webDb.manifest.source.relativePath) : resolveDataFilePath();
+
+  if (!fs.existsSync(filePath)) {
+    const emptyData: PromptlabData = { categories: [], tokens: [] };
+    fs.writeFileSync(filePath, JSON.stringify(emptyData, null, 2));
+  }
+
   res.json({
     aiEnabled: Boolean(process.env.GEMINI_API_KEY),
     dataFile: path.basename(filePath),
@@ -262,22 +441,43 @@ app.get('/api/config', (_req, res) => {
 });
 
 app.get('/api/data', (_req, res) => {
-  const { filePath, data } = readDataFile();
   const full = _req.query.full === '1';
+
+  const webDb = getCachedWebDb();
+  if (webDb && !full) {
+    res.json({
+      categories: webDb.manifest.categories,
+      tokens: webDb.summaryTokens,
+      meta: {
+        dataFile: webDb.manifest.source.fileName,
+        updatedAt: new Date(webDb.manifest.source.mtimeMs).toISOString(),
+        mode: 'summary',
+      },
+    });
+    return;
+  }
+
+  const cachedData = getCachedPromptlabData();
   res.json({
-    categories: data.categories,
-    tokens: full ? data.tokens : data.tokens.map(createTokenSummary),
+    categories: cachedData.data.categories,
+    tokens: full ? cachedData.data.tokens : cachedData.summaryTokens,
     meta: {
-      dataFile: path.basename(filePath),
-      updatedAt: fs.statSync(filePath).mtime.toISOString(),
+      dataFile: path.basename(cachedData.filePath),
+      updatedAt: cachedData.updatedAt,
       mode: full ? 'full' : 'summary',
     },
   });
 });
 
 app.get('/api/tokens/:id', (req, res) => {
-  const { data } = readDataFile();
-  const token = data.tokens.find((item) => item.id === req.params.id);
+  const webDbToken = getTokenFromWebDb(req.params.id);
+  if (webDbToken) {
+    res.json({ token: webDbToken });
+    return;
+  }
+
+  const cachedData = getCachedPromptlabData();
+  const token = cachedData.tokensById.get(req.params.id);
 
   if (!token) {
     res.status(404).json({ error: 'Token not found' });
@@ -388,4 +588,5 @@ if (fs.existsSync(path.join(projectRoot, 'dist'))) {
 app.listen(serverPort, () => {
   console.log(`Promptlab server listening on http://localhost:${serverPort}`);
   console.log(`Reading data files from ${dataDir}`);
+  warmPromptlabCache();
 });

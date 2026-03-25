@@ -7,6 +7,7 @@
     "dev": "vite --port=3000 --host=0.0.0.0",
     "dev:server": "tsx server/index.ts",
     "build": "vite build",
+    "build:webdb": "tsx scripts/generate-web-db.ts",
     "preview": "vite preview",
     "start": "tsx server/index.ts",
     "clean": "rm -rf dist",

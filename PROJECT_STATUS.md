@@ -47,6 +47,9 @@ Turn `promptlab-v1.8.1` into a production-ready web version of Promptlab with:
 - Cleaned the visible `TokenGrid` status line in the header area
 - Cleaned visible broken Russian strings in `Sidebar` actions, collapse button, and delete confirmation
 - Added `/api/health` and safer server-side data directory handling for hosted environments
+- Added server-side JSON caching keyed by file mtime to avoid reparsing the same database on every request
+- Added cached token summary list and token lookup map for faster `/api/data` and `/api/tokens/:id`
+- Added startup cache warmup and increased local Node heap for Cloudflare-tunneled PC hosting
 
 ## In Progress
 
