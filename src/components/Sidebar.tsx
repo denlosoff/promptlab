@@ -576,45 +576,21 @@ export const Sidebar = ({
   return (
     <>
       <aside 
-        className={`w-full bg-white flex flex-col h-full z-10 shrink-0 overflow-hidden ${isCollapsed ? 'cursor-pointer' : ''}`}
+        className={`w-full bg-white flex flex-col h-full z-10 shrink-0 overflow-hidden relative ${isCollapsed ? 'cursor-pointer' : ''}`}
         onClick={isCollapsed ? toggleCollapse : undefined}
       >
-        <div className={`border-b border-zinc-100 flex items-center h-12 shrink-0 ${isCollapsed ? 'justify-center' : 'p-3 justify-between'}`}>
-          <button 
-            onClick={toggleCollapse}
-            className={`p-1.5 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 rounded-md transition-colors ${isCollapsed ? '' : 'ml-auto'}`}
-            title={isCollapsed ? "Развернуть меню" : "Свернуть меню"}
-          >
-            {isCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
-          </button>
-        </div>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleCollapse();
+          }}
+          className="absolute top-1/2 right-0 translate-x-1/2 -translate-y-1/2 z-20 h-16 w-4 rounded-full border border-zinc-200 bg-white shadow-sm text-zinc-400 hover:text-zinc-600 hover:border-zinc-300 transition-all flex items-center justify-center"
+          title={isCollapsed ? "Expand menu" : "Collapse menu"}
+        >
+          {isCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
+        </button>
         <div className="flex-1 overflow-y-auto">
-          {activeCategory !== 'all' && !isCollapsed && (
-            <div className="px-4 py-2 mb-2 bg-zinc-50/50 border-b border-zinc-100 flex flex-wrap items-center gap-1 text-[10px] uppercase tracking-wider font-bold text-zinc-400">
-              <button 
-                onClick={() => {
-                  setActiveCategory('all');
-                  setSelectedFilters(new Set());
-                }}
-                className="hover:text-blue-600 transition-colors"
-              >
-                Toggle
-              </button>
-              {path.map((cat, i) => (
-                <React.Fragment key={cat.id}>
-                  <ChevronRight size={10} className="shrink-0" />
-                  <button 
-                    onClick={() => setActiveCategory(cat.id)}
-                    className={`hover:text-blue-600 transition-colors truncate max-w-[80px] ${i === path.length - 1 ? 'text-zinc-600' : ''}`}
-                  >
-                    {cat.name}
-                  </button>
-                </React.Fragment>
-              ))}
-            </div>
-          )}
-          
-          <div className={isCollapsed ? "p-1" : "p-3"}>
+          <div className={isCollapsed ? "p-1 pt-3" : "p-3"}>
             <nav className="space-y-1">
               <div
                 onClick={() => {

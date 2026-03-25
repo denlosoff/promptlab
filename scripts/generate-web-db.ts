@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import sharp from 'sharp';
 
 type Category = {
   id: string;
@@ -22,13 +23,17 @@ type Token = {
   coverImage?: string;
 };
 
+type MaterializedToken = Token & {
+  coverImage?: string;
+};
+
 type PromptlabData = {
   categories: Category[];
   tokens: Token[];
 };
 
 type WebDbManifest = {
-  schemaVersion: '1.0';
+  schemaVersion: '1.1';
   generatedAt: string;
   source: {
     fileName: string;
@@ -46,25 +51,43 @@ type WebDbManifest = {
   chunkSize: number;
 };
 
+const chunkSize = 100;
+const publicAssetBasePath = '/webdb-assets';
+const webDbSchemaVersion = '1.1';
+
 const currentFilePath = fileURLToPath(import.meta.url);
 const currentDir = path.dirname(currentFilePath);
 const projectRoot = path.resolve(currentDir, '..');
-const dataDir = path.isAbsolute(process.env.DATA_DIR || '')
-  ? String(process.env.DATA_DIR)
-  : path.resolve(projectRoot, process.env.DATA_DIR || '..');
-const webDbDir = path.join(dataDir, 'webdb');
-const webDbManifestPath = path.join(webDbDir, 'manifest.json');
-const chunkSize = 100;
-const publicAssetBasePath = '/webdb-assets';
 
-function ensureDataDirExists() {
+type GenerateWebDbContext = {
+  dataDir: string;
+  webDbDir: string;
+  webDbManifestPath: string;
+};
+
+function resolveDataDir() {
+  return path.isAbsolute(process.env.DATA_DIR || '')
+    ? String(process.env.DATA_DIR)
+    : path.resolve(projectRoot, process.env.DATA_DIR || '..');
+}
+
+function createContext(dataDir = resolveDataDir()): GenerateWebDbContext {
+  const webDbDir = path.join(dataDir, 'webdb');
+  return {
+    dataDir,
+    webDbDir,
+    webDbManifestPath: path.join(webDbDir, 'manifest.json'),
+  };
+}
+
+function ensureDataDirExists(dataDir: string) {
   if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
   }
 }
 
-function listCandidateDataFiles() {
-  ensureDataDirExists();
+function listCandidateDataFiles(dataDir: string) {
+  ensureDataDirExists(dataDir);
 
   return fs
     .readdirSync(dataDir)
@@ -79,15 +102,15 @@ function listCandidateDataFiles() {
     .sort((a, b) => fs.statSync(path.join(dataDir, b)).mtimeMs - fs.statSync(path.join(dataDir, a)).mtimeMs);
 }
 
-function resolveDataFilePath() {
+function resolveDataFilePath(dataDir: string) {
   if (process.env.DATA_FILE) {
     return path.isAbsolute(process.env.DATA_FILE)
       ? process.env.DATA_FILE
       : path.resolve(projectRoot, process.env.DATA_FILE);
   }
 
-  const candidates = listCandidateDataFiles().filter((name) => name.startsWith('promptlab-data'));
-  const fallbackCandidates = candidates.length > 0 ? candidates : listCandidateDataFiles();
+  const candidates = listCandidateDataFiles(dataDir).filter((name) => name.startsWith('promptlab-data'));
+  const fallbackCandidates = candidates.length > 0 ? candidates : listCandidateDataFiles(dataDir);
   const fileName = fallbackCandidates[0] || 'promptlab-data.json';
   return path.join(dataDir, fileName);
 }
@@ -154,7 +177,7 @@ function createTokenSummary(token: Token): Token {
     descriptionShort: token.descriptionShort,
     aliases: token.aliases,
     categoryIds: token.categoryIds,
-    coverImage: token.examples.length > 0 ? token.examples[0] : undefined,
+    coverImage: token.coverImage || (token.examples.length > 0 ? token.examples[0] : undefined),
     examples: [],
     exampleCount: token.examples.length,
   };
@@ -178,40 +201,115 @@ function getAssetInfo(example: string, tokenId: string, index: number) {
   };
 }
 
-function materializeTokenExamples(token: Token, assetDir: string): Token {
-  const examples = token.examples.map((example, index) => {
-    const asset = getAssetInfo(example, token.id, index);
-    if (!asset) {
-      return example;
-    }
+function isRasterMimeType(mimeType: string) {
+  return ['image/jpeg', 'image/png', 'image/webp', 'image/avif', 'image/tiff'].includes(mimeType);
+}
 
-    const assetPath = path.join(assetDir, asset.fileName);
-    if (!fs.existsSync(assetPath)) {
-      fs.writeFileSync(assetPath, asset.buffer);
-    }
+async function writeOptimizedAsset(assetPath: string, inputBuffer: Buffer) {
+  if (fs.existsSync(assetPath)) {
+    return true;
+  }
 
-    return `${publicAssetBasePath}/${asset.fileName}`;
-  });
+  try {
+    const optimized = await sharp(inputBuffer)
+      .rotate()
+      .resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true })
+      .webp({ quality: 78, effort: 4 })
+      .toBuffer();
+
+    fs.writeFileSync(assetPath, optimized);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function writeCoverAsset(assetPath: string, inputBuffer: Buffer) {
+  if (fs.existsSync(assetPath)) {
+    return true;
+  }
+
+  try {
+    const optimized = await sharp(inputBuffer)
+      .rotate()
+      .resize({ width: 640, height: 640, fit: 'cover', position: 'attention' })
+      .webp({ quality: 68, effort: 4 })
+      .toBuffer();
+
+    fs.writeFileSync(assetPath, optimized);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function materializeTokenExamples(token: Token, assetDir: string): Promise<MaterializedToken> {
+  let coverImage: string | undefined;
+  const examples = await Promise.all(
+    token.examples.map(async (example, index) => {
+      const asset = getAssetInfo(example, token.id, index);
+      if (!asset) {
+        if (index === 0) {
+          coverImage = example;
+        }
+        return example;
+      }
+
+      if (!isRasterMimeType(asset.mimeType)) {
+        const passthroughPath = path.join(assetDir, asset.fileName);
+        if (!fs.existsSync(passthroughPath)) {
+          fs.writeFileSync(passthroughPath, asset.buffer);
+        }
+
+        const publicPath = `${publicAssetBasePath}/${asset.fileName}`;
+        if (index === 0) {
+          coverImage = publicPath;
+        }
+        return publicPath;
+      }
+
+      const optimizedFileName = asset.fileName.replace(/\.[^.]+$/, '.webp');
+      const optimizedOk = await writeOptimizedAsset(path.join(assetDir, optimizedFileName), asset.buffer);
+      const optimizedPublicPath = optimizedOk ? `${publicAssetBasePath}/${optimizedFileName}` : `${publicAssetBasePath}/${asset.fileName}`;
+
+      if (!optimizedOk) {
+        const passthroughPath = path.join(assetDir, asset.fileName);
+        if (!fs.existsSync(passthroughPath)) {
+          fs.writeFileSync(passthroughPath, asset.buffer);
+        }
+      }
+
+      if (index === 0) {
+        const coverFileName = optimizedFileName.replace(/\.webp$/, '-cover.webp');
+        const coverOk = await writeCoverAsset(path.join(assetDir, coverFileName), asset.buffer);
+        coverImage = coverOk ? `${publicAssetBasePath}/${coverFileName}` : optimizedPublicPath;
+      }
+
+      return optimizedPublicPath;
+    }),
+  );
 
   return {
     ...token,
     examples,
+    coverImage,
   };
 }
 
-function isUpToDate(sourceFilePath: string) {
-  if (!fs.existsSync(webDbManifestPath)) {
+function isUpToDate(context: GenerateWebDbContext, sourceFilePath: string) {
+  if (!fs.existsSync(context.webDbManifestPath)) {
     return false;
   }
 
   const sourceStats = fs.statSync(sourceFilePath);
-  const manifest = JSON.parse(fs.readFileSync(webDbManifestPath, 'utf8')) as WebDbManifest;
+  const manifest = JSON.parse(fs.readFileSync(context.webDbManifestPath, 'utf8')) as WebDbManifest;
 
   return (
+    manifest.schemaVersion === webDbSchemaVersion &&
     manifest.source.fileName === path.basename(sourceFilePath) &&
     Math.floor(manifest.source.mtimeMs) === Math.floor(sourceStats.mtimeMs) &&
-    fs.existsSync(path.join(webDbDir, manifest.summaryFile)) &&
-    fs.existsSync(path.join(webDbDir, manifest.tokenIndexFile))
+    fs.existsSync(path.join(context.webDbDir, manifest.summaryFile)) &&
+    fs.existsSync(path.join(context.webDbDir, manifest.tokenIndexFile))
   );
 }
 
@@ -220,16 +318,17 @@ function writeJson(filePath: string, payload: unknown) {
   fs.writeFileSync(filePath, JSON.stringify(payload, null, 2));
 }
 
-function main() {
-  ensureDataDirExists();
-  const sourceFilePath = resolveDataFilePath();
+export async function generateWebDb(dataDir = resolveDataDir()) {
+  const context = createContext(dataDir);
+  ensureDataDirExists(context.dataDir);
+  const sourceFilePath = resolveDataFilePath(context.dataDir);
 
   if (!fs.existsSync(sourceFilePath)) {
     const emptyData: PromptlabData = { categories: [], tokens: [] };
     fs.writeFileSync(sourceFilePath, JSON.stringify(emptyData, null, 2));
   }
 
-  if (isUpToDate(sourceFilePath)) {
+  if (isUpToDate(context, sourceFilePath)) {
     console.log(`Web DB is up to date for ${path.basename(sourceFilePath)}`);
     return;
   }
@@ -240,7 +339,7 @@ function main() {
   const parsed = JSON.parse(fs.readFileSync(sourceFilePath, 'utf8'));
   const data = normalizeData(parsed);
   const tokenIndex: Record<string, string> = {};
-  const tempDir = `${webDbDir}.tmp`;
+  const tempDir = `${context.webDbDir}.tmp`;
   const chunkDirName = 'token-chunks';
   const assetDirName = 'assets';
   const chunkDir = path.join(tempDir, chunkDirName);
@@ -250,7 +349,7 @@ function main() {
   fs.mkdirSync(chunkDir, { recursive: true });
   fs.mkdirSync(assetDir, { recursive: true });
 
-  const materializedTokens = data.tokens.map((token) => materializeTokenExamples(token, assetDir));
+  const materializedTokens = await Promise.all(data.tokens.map((token) => materializeTokenExamples(token, assetDir)));
   const summaryTokens = materializedTokens.map(createTokenSummary);
 
   writeJson(path.join(tempDir, 'summary.json'), { tokens: summaryTokens });
@@ -270,11 +369,11 @@ function main() {
   writeJson(path.join(tempDir, 'token-index.json'), tokenIndex);
 
   const manifest: WebDbManifest = {
-    schemaVersion: '1.0',
+    schemaVersion: webDbSchemaVersion,
     generatedAt: new Date().toISOString(),
     source: {
       fileName: path.basename(sourceFilePath),
-      relativePath: path.relative(dataDir, sourceFilePath).replace(/\\/g, '/'),
+      relativePath: path.relative(context.dataDir, sourceFilePath).replace(/\\/g, '/'),
       mtimeMs: Math.floor(sourceStats.mtimeMs),
       sizeBytes: sourceStats.size,
     },
@@ -290,10 +389,21 @@ function main() {
 
   writeJson(path.join(tempDir, 'manifest.json'), manifest);
 
-  fs.rmSync(webDbDir, { recursive: true, force: true });
-  fs.renameSync(tempDir, webDbDir);
+  fs.rmSync(context.webDbDir, { recursive: true, force: true });
+  fs.renameSync(tempDir, context.webDbDir);
 
   console.log(`Web DB ready: ${data.tokens.length} tokens, ${data.categories.length} categories`);
 }
 
-main();
+async function main() {
+  await generateWebDb();
+}
+
+const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === currentFilePath;
+
+if (isDirectRun) {
+  main().catch((error) => {
+    console.error('Failed to generate Web DB:', error);
+    process.exitCode = 1;
+  });
+}

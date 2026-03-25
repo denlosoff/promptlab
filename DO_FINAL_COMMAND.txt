@@ -1,0 +1,23 @@
+cat >/opt/promptlab/.env <<'EOF1'
+ADMIN_PASSWORD=change-me-now-123
+PORT=3001
+DATA_DIR=/opt/promptlab/data
+EOF1
+mkdir -p /opt/promptlab/data && cat >/etc/systemd/system/promptlab.service <<'EOF2'
+[Unit]
+Description=Promptlab web app
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/promptlab
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/npm start
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF2
+systemctl daemon-reload && systemctl restart promptlab && ufw allow 3001/tcp && sleep 3 && curl http://localhost:3001/api/health

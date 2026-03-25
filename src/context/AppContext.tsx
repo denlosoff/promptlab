@@ -4,8 +4,10 @@ import {
   AppFeatures,
   Category,
   DataMeta,
+  DraftSource,
   PromptNode,
   RecentInput,
+  SyncStatus,
   Token,
   TokenSuggestion,
 } from '../types';
@@ -19,6 +21,9 @@ interface AppContextType {
   isReady: boolean;
   isLoading: boolean;
   isAdmin: boolean;
+  isAdminDataReady: boolean;
+  isLoggingOut: boolean;
+  syncStatus: SyncStatus;
   isSaving: boolean;
   activeCategory: string | 'all';
   selectedFilters: Set<string>;
@@ -40,6 +45,7 @@ interface AppContextType {
   };
   aiModel: string;
   isDraftMode: boolean;
+  draftSource: DraftSource | null;
   adminSuggestions: TokenSuggestion[];
   authError: string | null;
   setIsAdmin: (val: boolean) => void;
@@ -48,7 +54,7 @@ interface AppContextType {
   refreshSuggestions: () => Promise<void>;
   reviewSuggestion: (id: string, status: TokenSuggestion['status']) => Promise<void>;
   submitSuggestion: (payload: Omit<TokenSuggestion, 'id' | 'status' | 'createdAt'>) => Promise<void>;
-  startDraft: (draft: { categories: Category[]; tokens: Token[] }) => void;
+  startDraft: (draft: { categories: Category[]; tokens: Token[] }, source?: DraftSource) => void;
   applyDraft: () => void;
   cancelDraft: () => void;
   refreshData: () => Promise<void>;
@@ -156,6 +162,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [isReady, setIsReady] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>({
+    state: 'idle',
+    startedAt: null,
+    finishedAt: null,
+    error: null,
+    queued: false,
+    currentJobId: null,
+    recentJobs: [],
+  });
   const [isAdmin, setIsAdminState] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -181,24 +197,79 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   );
   const [aiModel, setAiModel] = useState(() => getSavedState('promptlab_aiModel', 'gemini-3-flash-preview'));
   const [isDraftMode, setIsDraftMode] = useState(false);
+  const [draftSource, setDraftSource] = useState<DraftSource | null>(null);
   const [draftData, setDraftData] = useState<{ categories: Category[]; tokens: Token[] } | null>(null);
   const [adminSuggestions, setAdminSuggestions] = useState<TokenSuggestion[]>([]);
   const [hasFullData, setHasFullData] = useState(false);
   const hasHydratedRef = useRef(false);
+  const latestCategoriesRef = useRef<Category[]>([]);
+  const latestTokensRef = useRef<Token[]>([]);
+  const saveTimeoutRef = useRef<number | null>(null);
 
   const currentCategories = isDraftMode && draftData ? draftData.categories : categories;
   const currentTokens = isDraftMode && draftData ? draftData.tokens : tokens;
+  const isAdminDataReady = isAdmin;
 
   useEffect(() => saveState('promptlab_promptNodes', promptNodes), [promptNodes]);
   useEffect(() => saveState('promptlab_recentInputs', recentInputs), [recentInputs]);
   useEffect(() => saveState('promptlab_searchSettings', searchSettings), [searchSettings]);
   useEffect(() => saveState('promptlab_aiModel', aiModel), [aiModel]);
+  useEffect(() => {
+    latestCategoriesRef.current = categories;
+  }, [categories]);
+  useEffect(() => {
+    latestTokensRef.current = tokens;
+  }, [tokens]);
+
+  useEffect(() => {
+    if (activeCategory === 'all') {
+      return;
+    }
+
+    const stillExists = currentCategories.some((category) => category.id === activeCategory);
+    if (!stillExists) {
+      setActiveCategory('all');
+      setSelectedFilters(new Set());
+    }
+  }, [activeCategory, currentCategories]);
+
+  useEffect(() => {
+    if (!selectedToken) {
+      return;
+    }
+
+    const nextSelectedToken = currentTokens.find((token) => token.id === selectedToken.id);
+    if (!nextSelectedToken) {
+      setSelectedToken(null);
+      return;
+    }
+
+    const mergedSelectedToken: Token = {
+      ...nextSelectedToken,
+      coverImage: nextSelectedToken.coverImage || selectedToken.coverImage,
+      exampleCount:
+        nextSelectedToken.exampleCount ??
+        selectedToken.exampleCount ??
+        (selectedToken.examples?.length || 0),
+      examples:
+        nextSelectedToken.examples && nextSelectedToken.examples.length > 0
+          ? nextSelectedToken.examples
+          : selectedToken.examples || [],
+    };
+
+    if (JSON.stringify(mergedSelectedToken) !== JSON.stringify(selectedToken)) {
+      setSelectedToken(mergedSelectedToken);
+    }
+  }, [selectedToken, currentTokens]);
 
   const loadData = async (full = false) => {
     setIsLoading(true);
     try {
       const [config, data] = await Promise.all([api.getConfig(), full ? api.getFullData() : api.getData()]);
       setFeatures({ aiEnabled: config.aiEnabled });
+      if (config.rebuildStatus) {
+        setSyncStatus(config.rebuildStatus);
+      }
       setMeta(data.meta);
       setCategories(normalizeIncomingData(data).categories);
       setTokens(normalizeIncomingData(data).tokens);
@@ -211,6 +282,66 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const refreshData = async () => loadData(isAdmin);
+
+  const persistLiveData = async (nextCategories: Category[], nextTokens: Token[]) => {
+    if (isDraftMode || !isAdmin || !hasFullData) {
+      return;
+    }
+
+    latestCategoriesRef.current = nextCategories;
+    latestTokensRef.current = nextTokens;
+    setIsSaving(true);
+
+    try {
+      const result = await api.saveData({
+        categories: nextCategories,
+        tokens: nextTokens,
+      });
+
+      if (result.rebuildStatus) {
+        setSyncStatus(result.rebuildStatus);
+      }
+
+      setMeta({
+        dataFile: result.dataFile,
+        updatedAt: new Date().toISOString(),
+        mode: 'full',
+      });
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const flushAdminChanges = async () => {
+    if (isDraftMode || !isAdmin || !hasFullData) {
+      return;
+    }
+
+    if (saveTimeoutRef.current !== null) {
+      window.clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+
+    setIsSaving(true);
+    try {
+      const result = await api.saveData({
+        categories: latestCategoriesRef.current,
+        tokens: latestTokensRef.current,
+      });
+      if (result.rebuildStatus) {
+        setSyncStatus(result.rebuildStatus);
+      }
+      setMeta({
+        dataFile: result.dataFile,
+        updatedAt: new Date().toISOString(),
+        mode: 'full',
+      });
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
   const refreshSuggestions = async () => {
     if (!isAdmin) {
@@ -229,7 +360,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const session = await api.checkSession().catch(() => ({ isAdmin: false }));
         setIsAdminState(session.isAdmin);
         if (session.isAdmin) {
-          await loadData(true);
+          setHasFullData(true);
         }
       } catch (error) {
         console.error(error);
@@ -249,27 +380,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [isAdmin]);
 
   useEffect(() => {
-    if (!hasHydratedRef.current || isDraftMode || !isAdmin || !hasFullData) {
+    if (!isAdmin) {
       return;
     }
 
-    const timeoutId = window.setTimeout(async () => {
-      try {
-        setIsSaving(true);
-        const result = await api.saveData({ categories, tokens });
-      setMeta((prev) => ({
-          dataFile: result.dataFile,
-          updatedAt: new Date().toISOString(),
-          mode: 'full',
-        }));
-      } catch (error) {
-        console.error(error);
-      } finally {
-        setIsSaving(false);
-      }
-    }, 250);
+    const intervalId = window.setInterval(() => {
+      api.getSyncStatus().then(setSyncStatus).catch((error) => console.error(error));
+    }, 1500);
 
-    return () => window.clearTimeout(timeoutId);
+    api.getSyncStatus().then(setSyncStatus).catch((error) => console.error(error));
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [isAdmin]);
+
+  useEffect(() => {
+    return;
   }, [categories, tokens, isDraftMode, isAdmin, hasFullData]);
 
   const setIsAdmin = (value: boolean) => {
@@ -287,9 +414,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const result = await api.login(password);
       setAdminToken(result.token);
       setIsAdminState(true);
+      setHasFullData(true);
       setAuthError(null);
-      await loadData(true);
-      await refreshSuggestions();
+      refreshSuggestions().catch((error) => console.error(error));
       return true;
     } catch {
       setAuthError('Неверный пароль администратора.');
@@ -298,16 +425,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const logoutAdmin = async () => {
-    try {
-      await api.logout();
-    } catch (error) {
-      console.error(error);
-    } finally {
-      setAdminToken(null);
-      setIsAdminState(false);
-      setAdminSuggestions([]);
-      await loadData(false);
+    if (isLoggingOut) {
+      return;
     }
+
+    setIsLoggingOut(true);
+    setAdminToken(null);
+    setIsAdminState(false);
+      setHasFullData(false);
+    setAdminSuggestions([]);
+      setSyncStatus({ state: 'idle', startedAt: null, finishedAt: null, error: null, queued: false, currentJobId: null, recentJobs: [] });
+
+    api.logout().catch((error) => {
+      console.error(error);
+    });
+
+    setIsLoggingOut(false);
+    loadData(false).catch((error) => console.error(error));
   };
 
   const submitSuggestion = async (payload: Omit<TokenSuggestion, 'id' | 'status' | 'createdAt'>) => {
@@ -319,9 +453,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await refreshSuggestions();
   };
 
-  const startDraft = (draft: { categories: Category[]; tokens: Token[] }) => {
+  const startDraft = (draft: { categories: Category[]; tokens: Token[] }, source: DraftSource = 'ai') => {
     setDraftData(draft);
     setIsDraftMode(true);
+    setDraftSource(source);
   };
 
   const applyDraft = () => {
@@ -337,11 +472,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setIsDraftMode(false);
     setDraftData(null);
+    setDraftSource(null);
   };
 
   const cancelDraft = () => {
     setIsDraftMode(false);
     setDraftData(null);
+    setDraftSource(null);
   };
 
   const updateRecentInputs = (text: string, type: 'token' | 'text', tokenId?: string) => {
@@ -549,7 +686,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    setCategories((prev) => [...prev, category]);
+    setCategories((prev) => {
+      const next = [...prev, category];
+      latestCategoriesRef.current = next;
+      return next;
+    });
+    if (isAdmin) {
+      api.saveCategory(category).then((result) => {
+        if (result.rebuildStatus) {
+          setSyncStatus(result.rebuildStatus);
+        }
+        setMeta({
+          dataFile: result.dataFile,
+          updatedAt: new Date().toISOString(),
+          mode: 'summary',
+        });
+      }).catch((error) => console.error(error));
+    }
   };
 
   const updateCategory = (id: string, name: string, icon?: string, parentId?: string) => {
@@ -565,7 +718,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    setCategories((prev) => updater(prev));
+    setCategories((prev) => {
+      const next = updater(prev);
+      latestCategoriesRef.current = next;
+      return next;
+    });
+    if (isAdmin) {
+      api.saveCategory({ id, name, icon, parentId }).then((result) => {
+        if (result.rebuildStatus) {
+          setSyncStatus(result.rebuildStatus);
+        }
+        setMeta({
+          dataFile: result.dataFile,
+          updatedAt: new Date().toISOString(),
+          mode: 'summary',
+        });
+      }).catch((error) => console.error(error));
+    }
   };
 
   const deleteCategory = (id: string) => {
@@ -602,14 +771,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setCategories((prev) => {
       const { nextCategories, idsToDelete } = removeCategory(prev);
-      setTokens((currentTokens) =>
-        currentTokens.map((token) => ({
+      const nextTokens = latestTokensRef.current.map((token) => ({
+        ...token,
+        categoryIds: token.categoryIds.filter((categoryId) => !idsToDelete.includes(categoryId)),
+      }));
+      latestCategoriesRef.current = nextCategories;
+      latestTokensRef.current = nextTokens;
+      setTokens((currentTokens) => {
+        const syncedTokens = currentTokens.map((token) => ({
           ...token,
           categoryIds: token.categoryIds.filter((categoryId) => !idsToDelete.includes(categoryId)),
-        })),
-      );
+        }));
+        return syncedTokens;
+      });
       return nextCategories;
     });
+    if (isAdmin) {
+      api.deleteCategory(id).then((result) => {
+        if (result.rebuildStatus) {
+          setSyncStatus(result.rebuildStatus);
+        }
+        setMeta({
+          dataFile: result.dataFile,
+          updatedAt: new Date().toISOString(),
+          mode: 'summary',
+        });
+      }).catch((error) => console.error(error));
+    }
   };
 
   const reorderCategories = (activeId: string, overId: string) => {
@@ -633,7 +821,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    setCategories((prev) => reorder(prev));
+    setCategories((prev) => {
+      const next = reorder(prev);
+      latestCategoriesRef.current = next;
+      return next;
+    });
+    if (isAdmin) {
+      const currentOrderedIds = reorder(latestCategoriesRef.current).map((category) => category.id);
+      api.reorderCategories(currentOrderedIds).then((result) => {
+        if (result.rebuildStatus) {
+          setSyncStatus(result.rebuildStatus);
+        }
+        setMeta({
+          dataFile: result.dataFile,
+          updatedAt: new Date().toISOString(),
+          mode: 'summary',
+        });
+      }).catch((error) => console.error(error));
+    }
   };
 
   const addToken = (token: Token) => {
@@ -642,7 +847,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    setTokens((prev) => [...prev, token]);
+    setTokens((prev) => {
+      const next = [...prev, token];
+      latestTokensRef.current = next;
+      return next;
+    });
+    if (isAdmin) {
+      api.saveToken(token).then((result) => {
+        if (result.rebuildStatus) {
+          setSyncStatus(result.rebuildStatus);
+        }
+        setMeta({
+          dataFile: result.dataFile,
+          updatedAt: new Date().toISOString(),
+          mode: 'summary',
+        });
+      }).catch((error) => console.error(error));
+    }
   };
 
   const updateToken = (token: Token) => {
@@ -658,17 +879,49 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    setTokens((prev) => updater(prev));
+    setTokens((prev) => {
+      const next = updater(prev);
+      latestTokensRef.current = next;
+      return next;
+    });
     setSelectedToken(token);
+    if (isAdmin) {
+      api.saveToken(token).then((result) => {
+        if (result.rebuildStatus) {
+          setSyncStatus(result.rebuildStatus);
+        }
+        setMeta({
+          dataFile: result.dataFile,
+          updatedAt: new Date().toISOString(),
+          mode: 'summary',
+        });
+      }).catch((error) => console.error(error));
+    }
   };
 
   const deleteToken = (id: string) => {
     if (isDraftMode) {
       setDraftData((prev) => (prev ? { ...prev, tokens: prev.tokens.filter((token) => token.id !== id) } : null));
     } else {
-      setTokens((prev) => prev.filter((token) => token.id !== id));
+      setTokens((prev) => {
+        const next = prev.filter((token) => token.id !== id);
+        latestTokensRef.current = next;
+        return next;
+      });
     }
     setPromptNodes((prev) => prev.filter((node) => node.type !== 'token' || node.tokenId !== id));
+    if (!isDraftMode && isAdmin) {
+      api.deleteToken(id).then((result) => {
+        if (result.rebuildStatus) {
+          setSyncStatus(result.rebuildStatus);
+        }
+        setMeta({
+          dataFile: result.dataFile,
+          updatedAt: new Date().toISOString(),
+          mode: 'summary',
+        });
+      }).catch((error) => console.error(error));
+    }
   };
 
   const reorderTokens = (activeId: string, overId: string) => {
@@ -689,7 +942,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    setTokens((prev) => reorder(prev));
+    setTokens((prev) => {
+      const next = reorder(prev);
+      latestTokensRef.current = next;
+      return next;
+    });
   };
 
   const addWordFormToToken = (tokenId: string, wordForm: string) => {
@@ -710,13 +967,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    setTokens((prev) => updater(prev));
+    setTokens((prev) => {
+      const next = updater(prev);
+      latestTokensRef.current = next;
+      return next;
+    });
   };
 
   const importData = (data: any) => {
     const normalized = normalizeIncomingData(data);
     setCategories(normalized.categories);
     setTokens(normalized.tokens);
+    latestCategoriesRef.current = normalized.categories;
+    latestTokensRef.current = normalized.tokens;
   };
 
   const exportData = () => {
@@ -738,9 +1001,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       meta,
       features,
       isReady,
-      isLoading,
-      isAdmin,
-      isSaving,
+        isLoading,
+        isAdmin,
+        isAdminDataReady,
+        isLoggingOut,
+        syncStatus,
+        isSaving,
       activeCategory,
       selectedFilters,
       searchQuery,
@@ -755,6 +1021,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       searchSettings,
       aiModel,
       isDraftMode,
+      draftSource,
       adminSuggestions,
       authError,
       setIsAdmin,
@@ -812,6 +1079,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       isReady,
       isLoading,
       isAdmin,
+      isAdminDataReady,
+      isLoggingOut,
+      syncStatus,
       isSaving,
       activeCategory,
       selectedFilters,
@@ -827,6 +1097,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       searchSettings,
       aiModel,
       isDraftMode,
+      draftSource,
       adminSuggestions,
       authError,
     ],

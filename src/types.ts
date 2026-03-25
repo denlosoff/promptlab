@@ -70,6 +70,52 @@ export interface AppFeatures {
   aiEnabled: boolean;
 }
 
+export interface JobRun {
+  id: string;
+  kind: 'webdb-rebuild' | 'import-inbox' | 'import-apply';
+  status: 'queued' | 'running' | 'succeeded' | 'failed';
+  scope?: string;
+  message?: string;
+  error?: string;
+  createdAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+}
+
+export interface SyncStatus {
+  state: 'idle' | 'running' | 'error';
+  startedAt: string | null;
+  finishedAt: string | null;
+  error: string | null;
+  queued?: boolean;
+  currentJobId?: string | null;
+  recentJobs?: JobRun[];
+}
+
+export type DraftSource = 'ai' | 'import';
+
+export interface ImportPreview {
+  mode: 'merge' | 'replace-master';
+  tokenCount: number;
+  categoryCount: number;
+  deletedTokenCount: number;
+  deletedCategoryCount: number;
+  newTokenCount: number;
+  updatedTokenCount: number;
+  unchangedTokenCount: number;
+  newCategoryCount: number;
+  updatedCategoryCount: number;
+  unchangedCategoryCount: number;
+  nextTokenCount: number;
+  nextCategoryCount: number;
+  newTokens: { id: string; name: string }[];
+  updatedTokens: { id: string; name: string; changedFields: string[] }[];
+  deletedTokens: { id: string; name: string }[];
+  newCategories: { id: string; name: string; parentId?: string }[];
+  updatedCategories: { id: string; name: string; parentId?: string; changedFields: string[] }[];
+  deletedCategories: { id: string; name: string; parentId?: string }[];
+}
+
 export interface TokenSuggestion {
   id: string;
   name: string;

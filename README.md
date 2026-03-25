@@ -27,6 +27,20 @@ User suggestions are stored separately in:
 
 - `promptlab-suggestions.json`
 
+Incoming import files can be dropped into:
+
+- `imports/`
+
+Supported formats:
+
+- full master snapshot: `{ "categories": [...], "tokens": [...] }`
+- `promptlab-token`
+- `promptlab-token-set`
+
+Processed files are archived into:
+
+- `imports/processed/`
+
 ## Environment
 
 Create `.env.local` or `.env` based on `.env.example` and set at least:

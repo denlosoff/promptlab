@@ -1,35 +1,14 @@
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import dotenv from 'dotenv';
+import { applyImportPayload, previewImportPayload, processImportInbox } from './importInbox.ts';
+import { LiveStore, type PromptlabData, type Category, type JobRun, type Token } from './liveStore.ts';
 
 dotenv.config();
-
-type Category = {
-  id: string;
-  name: string;
-  icon?: string;
-  parentId?: string;
-};
-
-type Token = {
-  id: string;
-  name: string;
-  descriptionShort: string;
-  aliases: string[];
-  wordForms?: string[];
-  categoryIds: string[];
-  examples: string[];
-  exampleCount?: number;
-  coverImage?: string;
-};
-
-type PromptlabData = {
-  categories: Category[];
-  tokens: Token[];
-};
 
 type CachedPromptlabData = {
   filePath: string;
@@ -41,7 +20,7 @@ type CachedPromptlabData = {
 };
 
 type WebDbManifest = {
-  schemaVersion: '1.0';
+  schemaVersion: '1.1';
   generatedAt: string;
   source: {
     fileName: string;
@@ -67,7 +46,25 @@ type CachedWebDb = {
   chunkCache: Map<string, Map<string, Token>>;
 };
 
+type RebuildStatus = {
+  state: 'idle' | 'running' | 'error';
+  startedAt: string | null;
+  finishedAt: string | null;
+  error: string | null;
+  queued: boolean;
+  currentJobId: string | null;
+  recentJobs?: JobRun[];
+};
+
 type SuggestionStatus = 'pending' | 'approved' | 'rejected';
+
+type ImportDraft = {
+  id: string;
+  createdAt: number;
+  preview: ReturnType<typeof previewImportPayload>;
+  nextData: PromptlabData;
+  nextSummary: PromptlabData;
+};
 
 type TokenSuggestion = {
   id: string;
@@ -99,8 +96,123 @@ const sessions = new Map<string, number>();
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7;
 let cachedPromptlabData: CachedPromptlabData | null = null;
 let cachedWebDb: CachedWebDb | null = null;
+let inboxProcessingPromise: Promise<void> | null = null;
+const importDrafts = new Map<string, ImportDraft>();
+let rebuildStatus: RebuildStatus = {
+  state: 'idle',
+  startedAt: null,
+  finishedAt: null,
+  error: null,
+  queued: false,
+  currentJobId: null,
+};
+let rebuildPromise: Promise<void> | null = null;
+let rebuildQueued = false;
 
 app.use(express.json({ limit: '20mb' }));
+
+function cleanupImportDrafts() {
+  const now = Date.now();
+  for (const [draftId, draft] of importDrafts.entries()) {
+    if (now - draft.createdAt > 1000 * 60 * 30) {
+      importDrafts.delete(draftId);
+    }
+  }
+}
+
+function scheduleWebDbRebuild() {
+  if (rebuildPromise) {
+    rebuildQueued = true;
+    rebuildStatus = {
+      ...rebuildStatus,
+      queued: true,
+    };
+    return rebuildPromise;
+  }
+
+  const jobId = crypto.randomUUID();
+  const startedAt = new Date().toISOString();
+  liveStore.createJob({
+    id: jobId,
+    kind: 'webdb-rebuild',
+    status: 'running',
+    scope: 'public-cache',
+    message: 'Rebuilding read-optimized web cache',
+    createdAt: startedAt,
+    startedAt,
+  });
+
+  rebuildStatus = {
+    state: 'running',
+    startedAt,
+    finishedAt: null,
+    error: null,
+    queued: false,
+    currentJobId: jobId,
+  };
+
+  rebuildPromise = new Promise<void>((resolve) => {
+    liveStore.exportToJsonFile();
+
+    const child = spawn(process.execPath, ['node_modules/tsx/dist/cli.mjs', 'scripts/generate-web-db.ts'], {
+      cwd: projectRoot,
+      env: {
+        ...process.env,
+        DATA_DIR: dataDir,
+      },
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+
+    child.on('error', (error) => {
+      console.error('Failed to start Web DB rebuild:', error);
+      liveStore.updateJob(jobId, {
+        status: 'failed',
+        error: error instanceof Error ? error.message : 'Web DB rebuild failed',
+        finishedAt: new Date().toISOString(),
+      });
+      rebuildStatus = {
+        state: 'error',
+        startedAt: rebuildStatus.startedAt,
+        finishedAt: new Date().toISOString(),
+        error: error instanceof Error ? error.message : 'Web DB rebuild failed',
+        queued: rebuildQueued,
+        currentJobId: jobId,
+      };
+      rebuildPromise = null;
+      if (rebuildQueued) {
+        rebuildQueued = false;
+        void scheduleWebDbRebuild();
+      }
+      resolve();
+    });
+
+    child.on('close', (code) => {
+      cachedWebDb = null;
+      liveStore.updateJob(jobId, {
+        status: code === 0 ? 'succeeded' : 'failed',
+        error: code === 0 ? undefined : `Web DB rebuild exited with code ${code}`,
+        finishedAt: new Date().toISOString(),
+      });
+      rebuildStatus = {
+        state: code === 0 ? 'idle' : 'error',
+        startedAt: rebuildStatus.startedAt,
+        finishedAt: new Date().toISOString(),
+        error: code === 0 ? null : `Web DB rebuild exited with code ${code}`,
+        queued: rebuildQueued,
+        currentJobId: jobId,
+      };
+      rebuildPromise = null;
+      if (rebuildQueued) {
+        rebuildQueued = false;
+        void scheduleWebDbRebuild();
+      }
+      resolve();
+    });
+  });
+
+  return rebuildPromise;
+}
 
 function cleanupSessions() {
   const now = Date.now();
@@ -256,6 +368,12 @@ function readDataFile(): { filePath: string; data: PromptlabData } {
   return { filePath, data: normalizeData(parsed) };
 }
 
+const liveStore = new LiveStore({
+  dataDir,
+  resolveDataFilePath,
+  readSourceData: readDataFile,
+});
+
 function createTokenSummary(token: Token): Token {
   return {
     ...token,
@@ -277,6 +395,13 @@ function buildCachedPromptlabData(filePath: string, data: PromptlabData): Cached
     data,
     summaryTokens,
     tokensById,
+  };
+}
+
+function buildSummaryData(data: PromptlabData): PromptlabData {
+  return {
+    categories: data.categories,
+    tokens: data.tokens.map(createTokenSummary),
   };
 }
 
@@ -389,20 +514,94 @@ function warmPromptlabCache() {
       return;
     }
 
-    const cachedData = getCachedPromptlabData();
-    console.log(`Promptlab cache ready for ${path.basename(cachedData.filePath)} with ${cachedData.data.tokens.length} tokens`);
+    const currentData = liveStore.getAllData();
+    console.log(`Promptlab live store ready with ${currentData.tokens.length} tokens`);
   } catch (error) {
     console.error('Failed to warm Promptlab cache on startup:', error);
   }
 }
 
 function writeDataFile(data: PromptlabData) {
-  ensureDataDirExists();
-  const filePath = resolveDataFilePath();
-  fs.writeFileSync(filePath, JSON.stringify(normalizeData(data), null, 2));
+  liveStore.replaceAllData(normalizeData(data), {
+    dataFile: path.basename(resolveDataFilePath()),
+  });
+  const filePath = liveStore.exportToJsonFile();
   cachedPromptlabData = null;
   cachedWebDb = null;
   return filePath;
+}
+
+async function ensureImportsProcessed() {
+  if (inboxProcessingPromise) {
+    await inboxProcessingPromise;
+    return;
+  }
+
+  const inboxDir = path.join(dataDir, 'imports');
+  if (!fs.existsSync(inboxDir)) {
+    return;
+  }
+
+  const pendingFiles = fs
+    .readdirSync(inboxDir)
+    .filter((name) => name.toLowerCase().endsWith('.json'))
+    .filter((name) => fs.statSync(path.join(inboxDir, name)).isFile());
+
+  if (pendingFiles.length === 0) {
+    return;
+  }
+
+  inboxProcessingPromise = (async () => {
+    const jobId = crypto.randomUUID();
+    const startedAt = new Date().toISOString();
+    liveStore.createJob({
+      id: jobId,
+      kind: 'import-inbox',
+      status: 'running',
+      scope: 'filesystem-inbox',
+      message: 'Processing import inbox files',
+      createdAt: startedAt,
+      startedAt,
+    });
+
+    try {
+      const imported = await processImportInbox({
+        dataDir,
+        readCurrentData: () => liveStore.getAllData(),
+        writeCurrentData: (data) => {
+          writeDataFile(data);
+        },
+      });
+
+      if (imported.length > 0) {
+        const summary = imported.map((entry) => `${entry.fileName} -> ${entry.mode}`).join(', ');
+        console.log(`Processed import inbox: ${summary}`);
+        liveStore.updateJob(jobId, {
+          status: 'succeeded',
+          message: `Processed ${imported.length} import file(s): ${summary}`,
+          finishedAt: new Date().toISOString(),
+        });
+        void scheduleWebDbRebuild();
+      } else {
+        liveStore.updateJob(jobId, {
+          status: 'succeeded',
+          message: 'No import files found',
+          finishedAt: new Date().toISOString(),
+        });
+      }
+    } catch (error) {
+      console.error('Failed to process import inbox:', error);
+      liveStore.updateJob(jobId, {
+        status: 'failed',
+        error: error instanceof Error ? error.message : 'Failed to process import inbox',
+        finishedAt: new Date().toISOString(),
+      });
+    } finally {
+      inboxProcessingPromise = null;
+    }
+  })();
+
+  await inboxProcessingPromise;
 }
 
 function readSuggestions(): TokenSuggestion[] {
@@ -426,9 +625,17 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/config', (_req, res) => {
+app.get('/api/sync-status', (_req, res) => {
+  res.json({
+    ...rebuildStatus,
+    recentJobs: liveStore.listJobs(12),
+  });
+});
+
+app.get('/api/config', async (_req, res) => {
+  await ensureImportsProcessed();
   const webDb = getCachedWebDb();
-  const filePath = webDb ? path.join(dataDir, webDb.manifest.source.relativePath) : resolveDataFilePath();
+  const filePath = resolveDataFilePath();
 
   if (!fs.existsSync(filePath)) {
     const emptyData: PromptlabData = { categories: [], tokens: [] };
@@ -437,48 +644,48 @@ app.get('/api/config', (_req, res) => {
 
   res.json({
     aiEnabled: Boolean(process.env.GEMINI_API_KEY),
-    dataFile: path.basename(filePath),
+    dataFile: liveStore.getDataFileName() || path.basename(filePath),
+    rebuildStatus,
   });
 });
 
-app.get('/api/data', (_req, res) => {
+app.get('/api/admin/jobs', requireAdmin, (_req, res) => {
+  res.json({ jobs: liveStore.listJobs(50) });
+});
+
+app.get('/api/data', async (_req, res) => {
+  await ensureImportsProcessed();
   const full = _req.query.full === '1';
 
   const webDb = getCachedWebDb();
-  if (webDb && !full) {
+  if (webDb && !full && rebuildStatus.state === 'idle') {
     res.json({
       categories: webDb.manifest.categories,
       tokens: webDb.summaryTokens,
       meta: {
-        dataFile: webDb.manifest.source.fileName,
-        updatedAt: new Date(webDb.manifest.source.mtimeMs).toISOString(),
+        dataFile: liveStore.getDataFileName(),
+        updatedAt: liveStore.getUpdatedAt(),
         mode: 'summary',
       },
     });
     return;
   }
 
-  const cachedData = getCachedPromptlabData();
+  const liveData = full ? liveStore.getAllData() : liveStore.getSummaryData();
   res.json({
-    categories: cachedData.data.categories,
-    tokens: full ? cachedData.data.tokens : cachedData.summaryTokens,
+    categories: liveData.categories,
+    tokens: liveData.tokens,
     meta: {
-      dataFile: path.basename(cachedData.filePath),
-      updatedAt: cachedData.updatedAt,
+      dataFile: liveStore.getDataFileName(),
+      updatedAt: liveStore.getUpdatedAt(),
       mode: full ? 'full' : 'summary',
     },
   });
 });
 
-app.get('/api/tokens/:id', (req, res) => {
-  const webDbToken = getTokenFromWebDb(req.params.id);
-  if (webDbToken) {
-    res.json({ token: webDbToken });
-    return;
-  }
-
-  const cachedData = getCachedPromptlabData();
-  const token = cachedData.tokensById.get(req.params.id);
+app.get('/api/tokens/:id', async (req, res) => {
+  await ensureImportsProcessed();
+  const token = liveStore.getTokenById(req.params.id);
 
   if (!token) {
     res.status(404).json({ error: 'Token not found' });
@@ -516,10 +723,159 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/admin/data', requireAdmin, (req, res) => {
+app.post('/api/admin/data', requireAdmin, async (req, res) => {
   const data = normalizeData(req.body);
   const filePath = writeDataFile(data);
-  res.json({ ok: true, dataFile: path.basename(filePath) });
+  void scheduleWebDbRebuild();
+  res.json({ ok: true, dataFile: path.basename(filePath), rebuildStatus });
+});
+
+app.post('/api/admin/tokens', requireAdmin, (req, res) => {
+  const token = normalizeData({ categories: [], tokens: [req.body] }).tokens[0];
+
+  if (!token?.id || !token.name) {
+    res.status(400).json({ error: 'Token id and name are required' });
+    return;
+  }
+
+  liveStore.upsertToken(token);
+  const filePath = liveStore.exportToJsonFile();
+  void scheduleWebDbRebuild();
+  res.json({ ok: true, token, dataFile: path.basename(filePath), rebuildStatus });
+});
+
+app.delete('/api/admin/tokens/:id', requireAdmin, (req, res) => {
+  liveStore.deleteToken(req.params.id);
+  const filePath = liveStore.exportToJsonFile();
+  void scheduleWebDbRebuild();
+  res.json({ ok: true, dataFile: path.basename(filePath), rebuildStatus });
+});
+
+app.post('/api/admin/categories', requireAdmin, (req, res) => {
+  const category = normalizeData({ categories: [req.body], tokens: [] }).categories[0];
+
+  if (!category?.id || !category.name) {
+    res.status(400).json({ error: 'Category id and name are required' });
+    return;
+  }
+
+  liveStore.upsertCategory(category);
+  const filePath = liveStore.exportToJsonFile();
+  void scheduleWebDbRebuild();
+  res.json({ ok: true, category, dataFile: path.basename(filePath), rebuildStatus });
+});
+
+app.delete('/api/admin/categories/:id', requireAdmin, (req, res) => {
+  liveStore.deleteCategory(req.params.id);
+  const filePath = liveStore.exportToJsonFile();
+  void scheduleWebDbRebuild();
+  res.json({ ok: true, dataFile: path.basename(filePath), rebuildStatus });
+});
+
+app.post('/api/admin/categories/reorder', requireAdmin, (req, res) => {
+  const orderedIds = Array.isArray(req.body?.orderedIds) ? req.body.orderedIds.map(String) : [];
+
+  if (orderedIds.length === 0) {
+    res.status(400).json({ error: 'orderedIds are required' });
+    return;
+  }
+
+  liveStore.reorderCategories(orderedIds);
+  const filePath = liveStore.exportToJsonFile();
+  void scheduleWebDbRebuild();
+  res.json({ ok: true, dataFile: path.basename(filePath), rebuildStatus });
+});
+
+app.post('/api/admin/import/preview', requireAdmin, async (req, res) => {
+  await ensureImportsProcessed();
+
+  try {
+    cleanupImportDrafts();
+    const currentData = liveStore.getAllData();
+    const preview = previewImportPayload(currentData, req.body);
+    const nextData = applyImportPayload(currentData, req.body);
+    const draftId = crypto.randomUUID();
+    importDrafts.set(draftId, {
+      id: draftId,
+      createdAt: Date.now(),
+      preview,
+      nextData,
+      nextSummary: buildSummaryData(nextData),
+    });
+    res.json({ preview, draftId });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Import preview failed' });
+  }
+});
+
+app.get('/api/admin/import/drafts/:id', requireAdmin, async (req, res) => {
+  await ensureImportsProcessed();
+  cleanupImportDrafts();
+
+  const draft = importDrafts.get(req.params.id);
+  if (!draft) {
+    res.status(404).json({ error: 'Import draft not found or expired' });
+    return;
+  }
+
+  res.json({
+    draftId: draft.id,
+    preview: draft.preview,
+    nextData: draft.nextSummary,
+  });
+});
+
+app.post('/api/admin/import/apply', requireAdmin, async (req, res) => {
+  await ensureImportsProcessed();
+
+  let jobId: string | null = null;
+  try {
+    cleanupImportDrafts();
+    let nextData: PromptlabData;
+    const draftId = typeof req.body?.draftId === 'string' ? req.body.draftId : null;
+
+    if (draftId) {
+      const draft = importDrafts.get(draftId);
+      if (!draft) {
+        res.status(404).json({ error: 'Import draft not found or expired' });
+        return;
+      }
+      nextData = draft.nextData;
+      importDrafts.delete(draftId);
+    } else {
+      const currentData = liveStore.getAllData();
+      nextData = applyImportPayload(currentData, req.body);
+    }
+
+    jobId = crypto.randomUUID();
+    const startedAt = new Date().toISOString();
+    liveStore.createJob({
+      id: jobId,
+      kind: 'import-apply',
+      status: 'running',
+      scope: 'admin-ui',
+      message: 'Applying import payload',
+      createdAt: startedAt,
+      startedAt,
+    });
+    const filePath = writeDataFile(nextData);
+    liveStore.updateJob(jobId, {
+      status: 'succeeded',
+      message: 'Import payload applied to live database',
+      finishedAt: new Date().toISOString(),
+    });
+    void scheduleWebDbRebuild();
+    res.json({ ok: true, dataFile: path.basename(filePath), rebuildStatus });
+  } catch (error) {
+    if (jobId) {
+      liveStore.updateJob(jobId, {
+        status: 'failed',
+        error: error instanceof Error ? error.message : 'Import apply failed',
+        finishedAt: new Date().toISOString(),
+      });
+    }
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Import apply failed' });
+  }
 });
 
 app.get('/api/admin/suggestions', requireAdmin, (_req, res) => {
@@ -576,7 +932,13 @@ app.post('/api/admin/suggestions/:id/status', requireAdmin, (req, res) => {
 
 if (fs.existsSync(path.join(projectRoot, 'dist'))) {
   if (fs.existsSync(path.join(webDbDir, 'assets'))) {
-    app.use('/webdb-assets', express.static(path.join(webDbDir, 'assets')));
+    app.use(
+      '/webdb-assets',
+      express.static(path.join(webDbDir, 'assets'), {
+        maxAge: '30d',
+        immutable: true,
+      }),
+    );
   }
 
   app.use(express.static(path.join(projectRoot, 'dist')));
@@ -593,5 +955,5 @@ if (fs.existsSync(path.join(projectRoot, 'dist'))) {
 app.listen(serverPort, () => {
   console.log(`Promptlab server listening on http://localhost:${serverPort}`);
   console.log(`Reading data files from ${dataDir}`);
-  warmPromptlabCache();
+  ensureImportsProcessed().finally(() => warmPromptlabCache());
 });

@@ -1,5 +1,15 @@
 const ADMIN_TOKEN_KEY = 'promptlab_admin_token';
 
+type ApiSyncStatus = {
+  state: 'idle' | 'running' | 'error';
+  startedAt: string | null;
+  finishedAt: string | null;
+  error: string | null;
+  queued?: boolean;
+  currentJobId?: string | null;
+  recentJobs?: any[];
+};
+
 export function getAdminToken() {
   return localStorage.getItem(ADMIN_TOKEN_KEY);
 }
@@ -45,7 +55,17 @@ async function request<T>(url: string, options: RequestOptions = {}): Promise<T>
 }
 
 export const api = {
-  getConfig: () => request<{ aiEnabled: boolean; dataFile: string }>('/api/config'),
+  getConfig: () =>
+    request<{
+      aiEnabled: boolean;
+      dataFile: string;
+      rebuildStatus?: ApiSyncStatus;
+    }>('/api/config'),
+  getSyncStatus: () => request<ApiSyncStatus>('/api/sync-status'),
+  getAdminJobs: () =>
+    request<{ jobs: any[] }>('/api/admin/jobs', {
+      requireAuth: true,
+    }),
   getData: () =>
     request<{
       categories: any[];
@@ -67,10 +87,54 @@ export const api = {
   checkSession: () => request<{ isAdmin: boolean }>('/api/auth/session', { requireAuth: true }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST', requireAuth: true }),
   saveData: (data: { categories: any[]; tokens: any[] }) =>
-    request<{ ok: boolean; dataFile: string }>('/api/admin/data', {
+    request<{ ok: boolean; dataFile: string; rebuildStatus?: any }>('/api/admin/data', {
       method: 'POST',
       requireAuth: true,
       body: JSON.stringify(data),
+    }),
+  saveToken: (token: any) =>
+    request<{ ok: boolean; token: any; dataFile: string; rebuildStatus?: any }>('/api/admin/tokens', {
+      method: 'POST',
+      requireAuth: true,
+      body: JSON.stringify(token),
+    }),
+  deleteToken: (id: string) =>
+    request<{ ok: boolean; dataFile: string; rebuildStatus?: any }>(`/api/admin/tokens/${id}`, {
+      method: 'DELETE',
+      requireAuth: true,
+    }),
+  saveCategory: (category: any) =>
+    request<{ ok: boolean; category: any; dataFile: string; rebuildStatus?: any }>('/api/admin/categories', {
+      method: 'POST',
+      requireAuth: true,
+      body: JSON.stringify(category),
+    }),
+  deleteCategory: (id: string) =>
+    request<{ ok: boolean; dataFile: string; rebuildStatus?: any }>(`/api/admin/categories/${id}`, {
+      method: 'DELETE',
+      requireAuth: true,
+    }),
+  reorderCategories: (orderedIds: string[]) =>
+    request<{ ok: boolean; dataFile: string; rebuildStatus?: any }>('/api/admin/categories/reorder', {
+      method: 'POST',
+      requireAuth: true,
+      body: JSON.stringify({ orderedIds }),
+    }),
+  previewImport: (payload: any) =>
+    request<{ preview: any; draftId: string }>('/api/admin/import/preview', {
+      method: 'POST',
+      requireAuth: true,
+      body: JSON.stringify(payload),
+    }),
+  getImportDraft: (draftId: string) =>
+    request<{ draftId: string; preview: any; nextData: { categories: any[]; tokens: any[] } }>(`/api/admin/import/drafts/${draftId}`, {
+      requireAuth: true,
+    }),
+  applyImport: (payload: any) =>
+    request<{ ok: boolean; dataFile: string; rebuildStatus?: any }>('/api/admin/import/apply', {
+      method: 'POST',
+      requireAuth: true,
+      body: JSON.stringify(payload),
     }),
   submitSuggestion: (payload: any) =>
     request<{ ok: boolean; suggestion: any }>('/api/suggestions', {

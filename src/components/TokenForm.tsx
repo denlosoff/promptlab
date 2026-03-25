@@ -210,12 +210,12 @@ export const TokenForm: React.FC<TokenFormProps> = ({ tokenToEdit, onClose, onSu
         <div className="flex items-start justify-between gap-3 mb-5">
           <div>
             <h2 className="text-lg font-semibold text-zinc-900">
-              {tokenToEdit ? 'Edit token' : isAdmin ? 'New token' : 'Suggest a token'}
+              {tokenToEdit ? 'Редактирование токена' : isAdmin ? 'Новый токен' : 'Предложить токен'}
             </h2>
             <p className="text-sm text-zinc-500 mt-1">
               {isAdmin
-                ? 'Changes are saved directly to the live database file.'
-                : 'Your proposal will be saved for admin review.'}
+                ? 'Изменения сохраняются сразу в живую базу.'
+                : 'Предложение сохранится для проверки администратором.'}
             </p>
           </div>
           {onClose && (
@@ -227,39 +227,39 @@ export const TokenForm: React.FC<TokenFormProps> = ({ tokenToEdit, onClose, onSu
 
         <div className="space-y-4 pb-6">
           <div>
-            <label className="block text-xs font-medium text-zinc-700 mb-1">Name *</label>
+            <label className="block text-xs font-medium text-zinc-700 mb-1">Название *</label>
             <input
               required
               value={name}
               onChange={(event) => setName(event.target.value)}
               className="w-full px-3 py-2 text-sm border border-zinc-300 rounded-md focus:ring-2 focus:ring-blue-500 outline-none"
-              placeholder="For example: Soft key light"
+              placeholder="Например: Soft key light"
             />
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-zinc-700 mb-1">Description</label>
+            <label className="block text-xs font-medium text-zinc-700 mb-1">Описание</label>
             <textarea
               value={description}
               onChange={(event) => setDescription(event.target.value)}
               className="w-full px-3 py-2 text-sm border border-zinc-300 rounded-md focus:ring-2 focus:ring-blue-500 outline-none"
               rows={3}
-              placeholder="Short explanation of the visual effect."
+              placeholder="Короткое описание визуального эффекта."
             />
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-zinc-700 mb-1">Aliases</label>
+            <label className="block text-xs font-medium text-zinc-700 mb-1">Синонимы</label>
             <input
               value={aliases}
               onChange={(event) => setAliases(event.target.value)}
               className="w-full px-3 py-2 text-sm border border-zinc-300 rounded-md focus:ring-2 focus:ring-blue-500 outline-none"
-              placeholder="comma, separated, aliases"
+              placeholder="синоним 1, синоним 2, синоним 3"
             />
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-zinc-700 mb-1">Word Forms</label>
+            <label className="block text-xs font-medium text-zinc-700 mb-1">Формы слова</label>
             <input
               value={wordForms}
               onChange={(event) => setWordForms(event.target.value)}
@@ -270,19 +270,19 @@ export const TokenForm: React.FC<TokenFormProps> = ({ tokenToEdit, onClose, onSu
 
           {!isAdmin && (
             <div>
-              <label className="block text-xs font-medium text-zinc-700 mb-1">Note for the admin</label>
+              <label className="block text-xs font-medium text-zinc-700 mb-1">Комментарий для администратора</label>
               <textarea
                 value={note}
                 onChange={(event) => setNote(event.target.value)}
                 className="w-full px-3 py-2 text-sm border border-zinc-300 rounded-md focus:ring-2 focus:ring-blue-500 outline-none"
                 rows={3}
-                placeholder="Optional context: why this token should be added, what it is useful for, etc."
+                placeholder="Необязательно: зачем добавлять этот токен и чем он полезен."
               />
             </div>
           )}
 
           <div>
-            <label className="block text-xs font-medium text-zinc-700 mb-2">Preview Images</label>
+            <label className="block text-xs font-medium text-zinc-700 mb-2">Изображения</label>
             <div className="grid grid-cols-3 gap-2">
               {examples.map((example, index) => (
                 <div key={`${example}-${index}`} className="relative group aspect-square rounded-md overflow-hidden border border-zinc-200">
@@ -294,27 +294,27 @@ export const TokenForm: React.FC<TokenFormProps> = ({ tokenToEdit, onClose, onSu
                         onClick={() => setAsCover(index)}
                         className="text-[10px] bg-white/20 hover:bg-white/40 text-white px-2 py-1 rounded"
                       >
-                        Set cover
+                        Сделать обложкой
                       </button>
                     )}
                     <button type="button" onClick={() => removeExample(index)} className="text-white hover:text-red-400 p-1">
                       <X size={16} />
                     </button>
                   </div>
-                  {index === 0 && <div className="absolute top-1 left-1 text-[8px] bg-blue-600 text-white px-1.5 py-0.5 rounded uppercase font-bold">Cover</div>}
+                  {index === 0 && <div className="absolute top-1 left-1 text-[8px] bg-blue-600 text-white px-1.5 py-0.5 rounded uppercase font-bold">Обложка</div>}
                 </div>
               ))}
 
               <label className="aspect-square rounded-md border-2 border-dashed border-zinc-300 flex flex-col items-center justify-center text-zinc-400 hover:bg-zinc-50 hover:text-blue-500 hover:border-blue-300 cursor-pointer transition-colors">
                 <Upload size={20} className="mb-1" />
-                <span className="text-[10px] font-medium">Upload</span>
+                <span className="text-[10px] font-medium">Загрузить</span>
                 <input type="file" accept="image/*" multiple className="hidden" onChange={handleImageUpload} />
               </label>
             </div>
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-zinc-700 mb-2">Categories</label>
+            <label className="block text-xs font-medium text-zinc-700 mb-2">Категории</label>
             {selectedLeafCategories.length > 0 && (
               <div className="flex flex-col gap-1 mb-3">
                 {selectedLeafCategories.map((categoryId) => (
@@ -331,17 +331,17 @@ export const TokenForm: React.FC<TokenFormProps> = ({ tokenToEdit, onClose, onSu
               </div>
             )}
 
-            <div className="border border-zinc-200 rounded-md overflow-hidden flex flex-col h-52">
+            <div className="border border-zinc-200 rounded-md overflow-hidden bg-white">
               {currentParentId && (
                 <button
                   type="button"
                   className="bg-zinc-50 border-b border-zinc-200 px-3 py-2 flex items-center gap-2 hover:bg-zinc-100 transition-colors text-left text-sm"
                   onClick={() => setCurrentParentId(categories.find((category) => category.id === currentParentId)?.parentId || null)}
                 >
-                  ← Back
+                  ← Назад
                 </button>
               )}
-              <div className="flex-1 overflow-y-auto p-1">
+              <div className="p-1">
                 {visibleCategories.map((category) => {
                   const hasChildren = categories.some((child) => child.parentId === category.id);
                   const isChecked = categoryIds.includes(category.id);
@@ -367,7 +367,7 @@ export const TokenForm: React.FC<TokenFormProps> = ({ tokenToEdit, onClose, onSu
                     </div>
                   );
                 })}
-                {visibleCategories.length === 0 && <div className="text-center py-4 text-xs text-zinc-400">No child categories here.</div>}
+                {visibleCategories.length === 0 && <div className="text-center py-4 text-xs text-zinc-400">Здесь нет дочерних категорий.</div>}
               </div>
             </div>
           </div>
@@ -383,14 +383,14 @@ export const TokenForm: React.FC<TokenFormProps> = ({ tokenToEdit, onClose, onSu
           {isSubmitting ? (
             <span className="inline-flex items-center gap-2">
               <Loader2 size={16} className="animate-spin" />
-              Saving...
+              Сохранение...
             </span>
           ) : isAdmin ? (
-            'Save token'
+            'Сохранить токен'
           ) : (
             <span className="inline-flex items-center gap-2">
               <Send size={16} />
-              Send suggestion
+              Отправить предложение
             </span>
           )}
         </button>
@@ -399,7 +399,7 @@ export const TokenForm: React.FC<TokenFormProps> = ({ tokenToEdit, onClose, onSu
           onClick={closeForm}
           className="flex-1 bg-zinc-100 text-zinc-700 py-2.5 rounded-md text-sm font-medium hover:bg-zinc-200 transition-colors"
         >
-          Cancel
+          Отмена
         </button>
       </div>
     </form>

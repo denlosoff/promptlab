@@ -115,14 +115,15 @@ Use this when importing a themed pack, library, or external contribution.
 
 ```json
 {
-  "schemaVersion": "1.0",
+  "schemaVersion": "1.1",
   "type": "promptlab-token-set",
   "meta": {
     "id": "cinematic-lighting-pack",
     "name": "Cinematic Lighting Pack",
     "version": "1.0.0",
     "author": "Your Name",
-    "description": "Portrait and scene lighting tokens."
+    "description": "Portrait and scene lighting tokens.",
+    "syncMode": "merge"
   },
   "categories": [
     {
@@ -156,7 +157,9 @@ Use this when importing a themed pack, library, or external contribution.
       "categoryIds": ["rim-light"],
       "examples": ["https://.../image-2.jpg"]
     }
-  ]
+  ],
+  "deletedTokenIds": [],
+  "deletedCategoryIds": []
 }
 ```
 
@@ -164,11 +167,91 @@ Use this when importing a themed pack, library, or external contribution.
 
 - `type` must be `promptlab-token-set`
 - `meta.id` should be stable across updates of the same pack
+- `meta.syncMode` may be:
+  - `merge`: upsert categories/tokens by `id`, keep everything else
+  - `replace-master`: replace the whole current master database with this file's `categories` and `tokens`
 - every token must follow the full token schema
 - every category referenced by tokens must exist in `categories`
 - IDs should be globally unique and slug-like
+- `deletedTokenIds` is optional and removes tokens by `id`
+- `deletedCategoryIds` is optional and removes categories by `id`
 
-## 5. Recommended ID Rules
+## 5. Import Inbox Workflow
+
+Promptlab now supports a drop-folder workflow.
+
+Drop incoming files into:
+
+- `DATA_DIR/imports/`
+
+On the next request or server startup, Promptlab will:
+
+1. read every `.json` file in `imports/`
+2. apply them in file modification order
+3. update the live master database
+4. regenerate `webdb`
+5. move processed files into `DATA_DIR/imports/processed/`
+
+### Supported inbox formats
+
+#### A. Full master snapshot
+
+Use this when an external app exports the entire database and you want this project to mirror it exactly.
+
+```json
+{
+  "categories": [...],
+  "tokens": [...]
+}
+```
+
+This is treated as:
+
+- full replacement of the current master database
+
+#### B. Single token package
+
+```json
+{
+  "schemaVersion": "1.0",
+  "type": "promptlab-token",
+  "categories": [...],
+  "token": { ... }
+}
+```
+
+This is treated as:
+
+- merge by `id`
+
+#### C. Token set package
+
+```json
+{
+  "schemaVersion": "1.1",
+  "type": "promptlab-token-set",
+  "meta": {
+    "syncMode": "merge"
+  },
+  "categories": [...],
+  "tokens": [...],
+  "deletedTokenIds": [],
+  "deletedCategoryIds": []
+}
+```
+
+### Recommended workflow by source
+
+- If the external app exports the whole current database:
+  export plain master JSON `{ "categories": [...], "tokens": [...] }`
+
+- If the external app exports only additions/changes:
+  export `promptlab-token-set` with `meta.syncMode = "merge"`
+
+- If the external app needs deletions to propagate:
+  either export a full master snapshot, or include `deletedTokenIds` / `deletedCategoryIds`
+
+## 6. Recommended ID Rules
 
 Use lowercase slug IDs:
 
@@ -183,7 +266,7 @@ Avoid:
 - uppercase IDs
 - IDs that depend on category position
 
-## 6. Safe Update Workflow
+## 7. Safe Update Workflow
 
 1. Keep the large master JSON as the source of truth.
 2. Generate the web format with `npm run build:webdb`.

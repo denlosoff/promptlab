@@ -24,9 +24,9 @@ import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from 'reac
 import { ErrorBoundary } from './components/ErrorBoundary';
 
 const DraftBanner = () => {
-  const { isDraftMode, applyDraft, cancelDraft } = useAppContext();
+  const { isDraftMode, draftSource, applyDraft, cancelDraft } = useAppContext();
 
-  if (!isDraftMode) {
+  if (!isDraftMode || draftSource !== 'ai') {
     return null;
   }
 
@@ -66,13 +66,13 @@ const LoadingScreen = () => (
 );
 
 const AppContent = () => {
-  const { promptNodes, reorderNodes, addToPrompt, insertNode, isReady } = useAppContext();
+  const { promptNodes, reorderNodes, addToPrompt, insertNode, isReady, setSelectedToken, setIsAddingToken } = useAppContext();
 
   const [activeId, setActiveId] = useState<string | null>(null);
   const [activeType, setActiveType] = useState<'token-grid' | 'prompt-node' | null>(null);
   const [activeData, setActiveData] = useState<any>(null);
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-  const [isRightSidebarCollapsed, setIsRightSidebarCollapsed] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(true);
+  const [isRightSidebarCollapsed, setIsRightSidebarCollapsed] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(280);
   const [rightSidebarWidth, setRightSidebarWidth] = useState(320);
   const [isResizingLeft, setIsResizingLeft] = useState(false);
@@ -257,7 +257,17 @@ const AppContent = () => {
             <PanelGroup orientation="vertical">
               <Panel minSize={30}>
                 <ErrorBoundary>
-                  <TokenGrid />
+                  <TokenGrid
+                    onRequestAddToken={() => {
+                      setSelectedToken(null);
+                      setIsAddingToken(true);
+                      setIsRightSidebarCollapsed(false);
+                    }}
+                    onRequestSelectToken={() => {
+                      setIsAddingToken(false);
+                      setIsRightSidebarCollapsed(false);
+                    }}
+                  />
                 </ErrorBoundary>
               </Panel>
               <PanelResizeHandle className="h-1 bg-zinc-200 hover:bg-blue-400 transition-colors cursor-row-resize flex items-center justify-center group">

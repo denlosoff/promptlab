@@ -52,6 +52,12 @@ Turn `promptlab-v1.8.1` into a production-ready web version of Promptlab with:
 - Added startup cache warmup and increased local Node heap for Cloudflare-tunneled PC hosting
 - Added generated Web DB assets pipeline that extracts embedded base64 images into static files
 - Reduced generated catalog payload from huge embedded-image JSON to lightweight summary + token chunks + asset URLs
+- Added import inbox pipeline:
+  - drop incoming `.json` files into `Toggle/imports`
+  - auto-apply merge or full replacement
+  - archive processed files
+  - rebuild `webdb` automatically
+- Added external export contract docs for the other Promptlab app
 
 ## In Progress
 
@@ -76,6 +82,7 @@ Turn `promptlab-v1.8.1` into a production-ready web version of Promptlab with:
 - Re-check user flow for "suggest token" vs admin flow for "add token"
 - Review prompt builder visual regressions after main catalog UI is stabilized
 - Complete external deployment and domain setup
+- Add admin-side visibility for processed import inbox history if needed
 
 ## Run Notes
 
