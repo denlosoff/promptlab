@@ -209,7 +209,7 @@ function isUpToDate(sourceFilePath: string) {
 
   return (
     manifest.source.fileName === path.basename(sourceFilePath) &&
-    manifest.source.mtimeMs === sourceStats.mtimeMs &&
+    Math.floor(manifest.source.mtimeMs) === Math.floor(sourceStats.mtimeMs) &&
     fs.existsSync(path.join(webDbDir, manifest.summaryFile)) &&
     fs.existsSync(path.join(webDbDir, manifest.tokenIndexFile))
   );
@@ -275,7 +275,7 @@ function main() {
     source: {
       fileName: path.basename(sourceFilePath),
       relativePath: path.relative(dataDir, sourceFilePath).replace(/\\/g, '/'),
-      mtimeMs: sourceStats.mtimeMs,
+      mtimeMs: Math.floor(sourceStats.mtimeMs),
       sizeBytes: sourceStats.size,
     },
     categoryCount: data.categories.length,

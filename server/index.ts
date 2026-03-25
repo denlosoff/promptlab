@@ -325,7 +325,7 @@ function getCachedWebDb(): CachedWebDb | null {
   }
 
   const sourceStats = fs.statSync(sourceFilePath);
-  if (sourceStats.mtimeMs !== manifest.source.mtimeMs) {
+  if (Math.floor(sourceStats.mtimeMs) !== Math.floor(manifest.source.mtimeMs)) {
     return null;
   }
 
