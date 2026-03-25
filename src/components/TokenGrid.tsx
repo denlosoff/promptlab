@@ -27,7 +27,14 @@ const TokenCard = ({ token, onClick, onAdd }: { token: Token; onClick: () => voi
     >
       {hasCover && (
         <>
-          <div className="absolute inset-0 bg-cover bg-center z-0 transition-transform duration-500 group-hover:scale-105" style={{ backgroundImage: `url(${coverImage})` }} />
+          <img
+            src={coverImage}
+            alt=""
+            loading="lazy"
+            decoding="async"
+            referrerPolicy="no-referrer"
+            className="absolute inset-0 w-full h-full object-cover z-0 transition-transform duration-500 group-hover:scale-105"
+          />
           <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent z-0 opacity-80 group-hover:opacity-90 transition-opacity" />
           <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors z-0" />
         </>
